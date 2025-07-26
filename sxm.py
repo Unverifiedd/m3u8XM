@@ -42,17 +42,23 @@ class SiriusXM:
     def is_session_authenticated(self):
         return 'Authorization' in self.session.headers
     
-    def sfetch(self, url):
+    def sfetch(self, url,retries=0): # if this errors again, its likely VLC or something holding old urls prob, gotta force a refresh then somehow
+        if retries >= 2:
+            self.log("Failed to reauthenticate after 401. Dump: ",self.session.headers)
         res = self.session.get(url)
         if res.status_code != 200:
+            if res.status_code >= 400 and res.status_code < 500:
+                self.login()
+                self.authenticate()
+                return self.sfetch(self,url,retries=retries+1)
             self.log("Failed to recieve stream data. Error code {}".format(str(res.status_code)))
             return None
+                
         return res.content
 
     def get(self, method, params={}, authenticate=True, retries=0):
-        retries += 1
         if retries >= 3:
-            self.log("Max retries hit on {}".format(method))
+            self.log("Max retries hit on {} using method Get".format(method))
             return None
         if authenticate and not self.is_session_authenticated() and not self.authenticate():
             self.log('Unable to authenticate')
@@ -60,9 +66,10 @@ class SiriusXM:
 
         res = self.session.get(self.REST_FORMAT.format(method), params=params)
         if res.status_code != 200:
-            if res.status_code == 401 or res.status_code == 403:
+            if res.status_code >= 400 and res.status_code < 500:
                 self.login()
-                return self.post(method, postdata=params, authenticate=authenticate, retries=retries)
+                self.authenticate()
+                return self.post(method, postdata=params, authenticate=authenticate, retries=retries+1)
             self.log('Received status code {} for method \'{}\''.format(res.status_code, method))
             return None
 
@@ -73,9 +80,8 @@ class SiriusXM:
             return None
 
     def post(self, method, postdata, authenticate=True, headers={},retries=0):
-        retries += 1
         if retries >= 3:
-            self.log("Max retries hit on {}".format(method))
+            self.log("Max retries hit on {} using method Post".format(method))
             return None
         if authenticate and not self.is_session_authenticated() and not self.authenticate():
             self.log('Unable to authenticate')
@@ -83,9 +89,10 @@ class SiriusXM:
 
         res = self.session.post(self.REST_FORMAT.format(method), data=json.dumps(postdata),headers=headers)
         if res.status_code != 200 and res.status_code != 201:
-            if res.status_code == 401 or res.status_code == 403:
+            if res.status_code >= 400 and res.status_code < 500:
                 self.login()
-                return self.post(method,postdata,authenticate,headers,retries)
+                self.authenticate()
+                return self.post(method,postdata,authenticate,headers,retries+1)
             self.log('Received status code {} for method \'{}\''.format(res.status_code, method))
             return None
 
@@ -108,6 +115,10 @@ class SiriusXM:
         # The following is reserved for Authentication:
         # Login
         # Affirm Authentication
+
+        # do a completely new session
+        self.session = requests.Session()
+        self.session.headers.update({'User-Agent': self.USER_AGENT})
 
         postdata = {
             'devicePlatform': "web-desktop",
@@ -373,10 +384,11 @@ class SiriusXM:
         streaminfo["sources"] = m3u8_loc
         streaminfo["chid"] = base_url.split('/')[-2]
         streaminfo["sourceContextId"] = sourceContextId
-        streamdata = self.sfetch(primarystreamurl).decode("utf-8")
+        streamdata = self.sfetch(primarystreamurl)
         if not streamdata:
             self.log("Failed to fetch m3u8 stream details")
             return False
+        streamdata = streamdata.decode("utf-8")
         # TODO: make this have options for other qualities (url parameter?)
         for line in streamdata.splitlines():
             if line.find("256k") > 0 and line.endswith("m3u8"):
@@ -408,10 +420,11 @@ class SiriusXM:
         sessionId = streaminfo["sessionId"] if "sessionId" in streaminfo and streaminfo["sessionId"] != None else ''
         aacurl = "{}/{}".format(streaminfo["base_url"],streaminfo["quality"])
         # fetch the list of aac files
-        data = self.sfetch(aacurl).decode("utf-8")
+        data = self.sfetch(aacurl)
         if not data:
             self.log("failed to fetch AAC stream list")
             return False
+        data = data.decode("utf-8")
         data = data.replace("https://api.edge-gateway.siriusxm.com/playback/key/v1/","/key/",1)
         lineoutput = []
         lines = data.splitlines()
